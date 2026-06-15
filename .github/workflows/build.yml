@@ -34,12 +34,12 @@ jobs:
     name: Linux AMD64 (compile-verify)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: game
 
       - name: Check out ReXGlue SDK (headers)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.SDK_REPO }}
           path: sdk
@@ -82,12 +82,12 @@ jobs:
     name: Windows AMD64 (compile-verify)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: game
 
       - name: Check out ReXGlue SDK (headers)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.SDK_REPO }}
           path: sdk
@@ -129,12 +129,12 @@ jobs:
     name: Android arm64-v8a (compile-verify)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: game
 
       - name: Check out ReXGlue SDK (headers)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.SDK_REPO }}
           path: sdk
