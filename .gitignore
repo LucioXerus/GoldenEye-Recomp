@@ -50,3 +50,6 @@ android/build/
 android/app/build/
 android/app/.cxx/
 android/local.properties
+
+# --- Reference: FSR fork source code (not part of this project) ---
+/GoldenEye-Recomp-FSR-fork/
