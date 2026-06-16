@@ -12,6 +12,7 @@
 #include <rex/cvar.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>  // ImDrawListSharedData (complete type) for GetDrawListSharedData()
 
 #include <cstring>
 #include <string>
