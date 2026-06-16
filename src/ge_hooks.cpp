@@ -482,7 +482,8 @@ void ge_dbg_now(PPCRegister& r9, PPCRegister& r30) {
   ge_start_watchdog_once();
   // Snapshot the CP progress counter BEFORE sampling CP state below, so a drain
   // that lands between our sample and our wait is not lost (the wait re-checks).
-  uint64_t cp_seq = rex_ge_cp_progress_seq();
+  // Only consumed by the arm64 blocking-wait path below; unused on desktop.
+  [[maybe_unused]] uint64_t cp_seq = rex_ge_cp_progress_seq();
   auto* cpp = ge_cp();
   uint32_t cpc = cpp ? cpp->counter() : 0;
   uint32_t rpi = cpp ? static_cast<CPProbe*>(cpp)->rpi() : 0;
@@ -539,17 +540,29 @@ void ge_dbg_now(PPCRegister& r9, PPCRegister& r30) {
       drawn = true;
       if (dev) base[dev + 10941u] |= 0x02u;   // stalled: skip this GPU wait
     }
-    // The six GPU-completion waits poll this routine. The old code yielded in a
-    // TIGHT busy spin here -- with dozens of guest threads that oversubscribed
-    // the cores and starved the rexglue CP worker (the very thread that must
-    // advance the ring read pointer / swap counter to satisfy (a)/(b)), so the
-    // fence never advanced and the spin never exited = freeze, worst on low-core
-    // arm64 handhelds. Instead, BLOCK on real CP progress: the CP worker signals
-    // every drain (it bumps the seq behind rex_ge_cp_progress_seq), waking us the
-    // instant it advances.
-    // The bounded timeout is just a safety net so the ~80ms skip-bit fallback
-    // above still runs if the CP genuinely makes no progress. No core burned.
-    if (!drawn) rex_ge_cp_wait_progress(cp_seq, 2000u);  // <=2ms, woken on progress
+    // The six GPU-completion waits poll this routine. How we wait here is
+    // arch-gated, because the right answer depends on core count:
+    //
+    //  - arm64 handhelds (few cores): a TIGHT yield busy-spin oversubscribes the
+    //    cores and starves the rexglue CP worker (the very thread that must
+    //    advance the ring read pointer / swap counter to satisfy (a)/(b)), so the
+    //    fence never advances and the spin never exits = freeze. Instead BLOCK on
+    //    real CP progress: the CP worker bumps the seq behind rex_ge_cp_progress_seq
+    //    on every drain, waking us the instant it advances. Bounded timeout just
+    //    lets the ~80ms skip-bit fallback above still run. No core burned.
+    //
+    //  - desktop x86-64 (many cores): the CP worker always gets a core, so the
+    //    plain yield is correct AND the blocking wait actively regresses boot --
+    //    it froze GoldenEye on the very first intro screen (render skipped every
+    //    frame while the loop ran at 60fps). Confirmed by bisect: main (yield)
+    //    boots to the menu, the blocking-wait commit freezes. Keep the yield here.
+    if (!drawn) {
+#if defined(__aarch64__)
+      rex_ge_cp_wait_progress(cp_seq, 2000u);  // <=2ms, woken on progress
+#else
+      std::this_thread::yield();
+#endif
+    }
   } else {
     s_waiting = false;
   }
