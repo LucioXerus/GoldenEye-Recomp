@@ -85,10 +85,29 @@ the commands below to pick a different target or build type.
 - **Ninja** (the presets' generator).
 
 ```sh
-# After running codegen above:
-cmake --preset linux-amd64-relwithdebinfo -DREXSDK_DIR=/path/to/GoldenEye-Recomp-rexglue
-cmake --build --preset linux-amd64-relwithdebinfo
-# Binary: out/build/linux-amd64-relwithdebinfo/ge  → run with ./ge
+# 1. Build the ReXGlue SDK (codegen tool + runtime library).
+cd GoldenEye-Recomp-rexglue
+mkdir -p build && cd build
+cmake .. -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_LINKER_TYPE=LLD
+cd ..
+cmake --build build -j$(nproc)
+
+# 2. Generate the recompiled game code from your game files.
+cd ..
+REX_MAX_JUMP_TABLE_ENTRIES=2048 ./GoldenEye-Recomp-rexglue/out/linux-amd64/rexglue codegen ge_manifest.toml
+
+# 3. Configure the game project (links against the rexglue SDK in-tree).
+cmake --preset linux-amd64-release \
+    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_LINKER_TYPE=LLD \
+    -DREXSDK_DIR=GoldenEye-Recomp-rexglue/
+
+# 4. Build.
+cmake --build --preset linux-amd64-release -j$(nproc)
+cp out/build/linux-amd64-release/ge release/
+cp GoldenEye-Recomp-rexglue/out/linux-amd64/librexruntime.so release/
+cp GoldenEye-Recomp-rexglue/out/linux-amd64/libTracyClient.so release/
+cp -r assets release/
 ```
 
 ### Windows (x64)
