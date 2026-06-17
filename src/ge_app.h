@@ -55,12 +55,21 @@ class GeApp : public rex::ReXApp {
     // it is never written here (writing default==default is a no-op anyway).
   }
 
-  // Register the ESC pause-menu keybind and create the always-on Post-FX
-  // filter overlay once the ImGui drawer exists.
+  // Register the ESC pause-menu keybind and create the Post-FX filter overlay
+  // once the ImGui drawer exists -- but only if Post-FX is actually enabled.
+  // A permanently-registered UI drawer forces the presenter onto the UI-thread
+  // paint path every guest frame; on Wayland that makes GTK software-composite
+  // its whole widget tree through Cairo/pixman (a ~4K sse2_fill per frame, all
+  // hidden behind the Vulkan subsurface) even when the overlay draws nothing.
+  // When disabled, leaving it unregistered lets the guest output thread present
+  // directly. The overlay is (re)created on demand -- see SyncPostFxOverlay.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    (void)drawer;
     rex::ui::RegisterBind("bind_pause_menu", "Escape", "Pause menu",
                           [this] { TogglePauseMenu(); });
-    postfx_ = std::make_unique<ge::PostFxOverlay>(drawer);
+    if (rex::cvar::GetFlagByName("postfx_enabled") == "true") {
+      EnsurePostFxOverlay();
+    }
     // Username/server are set in the ONLINE pause-menu tab now -- no first-boot
     // prompt. They apply on the Save & Restart the ONLINE tab triggers.
   }
@@ -84,8 +93,20 @@ class GeApp : public rex::ReXApp {
       menu_->RequestClose();  // on_closed clears menu_
       return;
     }
+    // Opening the menu: make sure the Post-FX overlay exists so its effect is
+    // visible live underneath the menu while the user tweaks the sliders, even
+    // if it was disabled (and therefore unregistered) until now.
+    EnsurePostFxOverlay();
     GeMenuDialog::Callbacks cb;
-    cb.on_closed = [this] { menu_ = nullptr; };
+    cb.on_closed = [this] {
+      menu_ = nullptr;
+      // The menu may have toggled postfx_enabled. Reconcile the overlay's
+      // registration with the new state -- dropping it when disabled returns
+      // the Wayland present path to the cheap guest-output-thread route.
+      // Deferred so the drawer/presenter lifecycle isn't mutated from inside a
+      // paint (same rule the fullscreen/restart paths follow).
+      app_context().CallInUIThreadDeferred([this] { SyncPostFxOverlay(); });
+    };
     cb.on_quit = [this] {
       if (runtime() && runtime()->kernel_state()) {
         runtime()->kernel_state()->TerminateTitle();
@@ -123,6 +144,29 @@ class GeApp : public rex::ReXApp {
     menu_ = new GeMenuDialog(imgui_drawer(), std::move(cb));
   }
 
+  // Create the Post-FX overlay if it doesn't already exist. Registering it as a
+  // dialog puts the presenter on the UI-thread paint path, which is required
+  // for ImGui to draw at all.
+  void EnsurePostFxOverlay() {
+    if (!postfx_ && imgui_drawer()) {
+      postfx_ = std::make_unique<ge::PostFxOverlay>(imgui_drawer());
+    }
+  }
+
+  // Reconcile the overlay's existence with postfx_enabled: keep it while the
+  // filter is on (or the menu is open, for live preview), otherwise tear it
+  // down so ui_drawers_ goes empty and the guest output thread can present
+  // directly (no per-frame GTK/pixman compositing on Wayland).
+  void SyncPostFxOverlay() {
+    bool want = (rex::cvar::GetFlagByName("postfx_enabled") == "true") || menu_ != nullptr;
+    if (want) {
+      EnsurePostFxOverlay();
+    } else {
+      postfx_.reset();
+    }
+  }
+
   GeMenuDialog* menu_ = nullptr;  // non-owning; self-deletes via the drawer
-  std::unique_ptr<ge::PostFxOverlay> postfx_;       // always-on filter layer
+  std::unique_ptr<ge::PostFxOverlay> postfx_;  // filter layer; alive only while
+                                               // enabled or the menu is open
 };
