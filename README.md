@@ -1,4 +1,4 @@
-Support me on Ko-fi: https://ko-fi.com/sunjayy
+Support me on Ko-fi: https://ko-fi.com/lucio1992xerus
 
 # GoldenEye 007 — PC Recompilation
 
@@ -83,12 +83,41 @@ the commands below to pick a different target or build type.
   only ships versioned binaries (e.g. `clang-20`), either symlink them or override
   `CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER`.
 - **Ninja** (the presets' generator).
+To install dependencies: 
+Debian/Ubuntu:
 
+```sh
+sudo apt install \
+  git cmake ninja-build build-essential pkg-config python3 \
+  clang llvm lld libsdl3-dev libvulkan-dev \
+  vulkan-tools mesa-vulkan-drivers \
+  libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
+  libxcursor-dev libxi-dev libasound2-dev \
+  libwayland-dev libdrm-dev libudev-dev
+```
+Fedora:
+
+```sh
+sudo dnf install \
+  git cmake ninja-build pkgconf-pkg-config python3 \
+  clang llvm lld SDL3-devel vulkan-loader-devel \
+  vulkan-tools mesa-vulkan-drivers \
+  mesa-libGL-devel libX11-devel libXrandr-devel libXinerama-devel \
+  libXcursor-devel libXi-devel alsa-lib-devel \
+  wayland-devel libdrm-devel systemd-devel
+```
+Then you can build an optimized build specifically for your machine:
 ```sh
 # 1. Build the ReXGlue SDK (codegen tool + runtime library).
 cd GoldenEye-Recomp-rexglue
 mkdir -p build && cd build
-cmake .. -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_LINKER_TYPE=LLD
+cmake .. \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_LINKER_TYPE=LLD \
+  -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+  -DCMAKE_C_FLAGS="-march=native -mtune=native" \
+  -DCMAKE_CXX_FLAGS="-march=native -mtune=native"
 cd ..
 cmake --build build -j$(nproc)
 
@@ -100,6 +129,9 @@ REX_MAX_JUMP_TABLE_ENTRIES=2048 ./GoldenEye-Recomp-rexglue/out/linux-amd64/rexgl
 cmake --preset linux-amd64-release \
     -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_LINKER_TYPE=LLD \
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+    -DCMAKE_C_FLAGS="-march=native -mtune=native" \
+    -DCMAKE_CXX_FLAGS="-march=native -mtune=native" \
     -DREXSDK_DIR=GoldenEye-Recomp-rexglue/
 
 # 4. Build.
