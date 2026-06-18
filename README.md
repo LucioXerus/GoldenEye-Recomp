@@ -83,8 +83,8 @@ the commands below to pick a different target or build type.
   only ships versioned binaries (e.g. `clang-20`), either symlink them or override
   `CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER`.
 - **Ninja** (the presets' generator).
-To install dependencies: 
-Debian/Ubuntu:
+- To install dependencies: 
+- Debian/Ubuntu:
 
 ```sh
 sudo apt install \
@@ -95,7 +95,7 @@ sudo apt install \
   libxcursor-dev libxi-dev libasound2-dev \
   libwayland-dev libdrm-dev libudev-dev
 ```
-Fedora:
+- Fedora:
 
 ```sh
 sudo dnf install \
@@ -106,7 +106,7 @@ sudo dnf install \
   libXcursor-devel libXi-devel alsa-lib-devel \
   wayland-devel libdrm-devel systemd-devel
 ```
-Then you can build an optimized build specifically for your machine:
+- Then you can build an optimized build specifically for your machine:
 ```sh
 # 1. Build the ReXGlue SDK (codegen tool + runtime library).
 cd GoldenEye-Recomp-rexglue
