@@ -136,6 +136,7 @@ cmake --preset linux-amd64-release \
 
 # 4. Build.
 cmake --build --preset linux-amd64-release -j$(nproc)
+mkdir release
 cp out/build/linux-amd64-release/ge release/
 cp GoldenEye-Recomp-rexglue/out/linux-amd64/librexruntime.so release/
 cp GoldenEye-Recomp-rexglue/out/linux-amd64/libTracyClient.so release/
