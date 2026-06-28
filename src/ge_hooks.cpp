@@ -10,6 +10,7 @@
 // and the recompiled source function then returns.
 
 #include <atomic>
+#include <cmath>    // sqrtf (CE network-armor nearest-player fix)
 #include <cstdint>
 #include <cstring>
 
@@ -173,6 +174,13 @@ inline uint32_t LD32(uint8_t* b, uint32_t ga) {
 }
 inline uint64_t LD64(uint8_t* b, uint32_t ga) {
   uint64_t v; std::memcpy(&v, b + ga, 8); return __builtin_bswap64(v);
+}
+inline uint16_t LD16(uint8_t* b, uint32_t ga) {
+  uint16_t v; std::memcpy(&v, b + ga, 2); return __builtin_bswap16(v);
+}
+inline float LDF32(uint8_t* b, uint32_t ga) {
+  uint32_t v; std::memcpy(&v, b + ga, 4); v = __builtin_bswap32(v);
+  float f; std::memcpy(&f, &v, 4); return f;
 }
 inline void ST32(uint8_t* b, uint32_t ga, uint32_t val) {
   uint32_t v = __builtin_bswap32(val); std::memcpy(b + ga, &v, 4);
@@ -716,4 +724,342 @@ void ge_hook_830E0750(PPCRegister& r7, PPCRegister& r8, PPCRegister& r11,
   ST32(base, r11.u32 + 0x1ECu, t);
   r8.u32 = 0;
   ST32(base, r11.u32 + 0x200u, 0);
+}
+
+// ===========================================================================
+// BeanTools Community Edition data-patch bootstrap. Applies the data-only CE
+// bug-fixes (ge_ce_patches.cpp) exactly once, the first time the guest polls
+// input. The data segment is live in guest RAM by the first input poll (menu),
+// which precedes any level load -- so the fixed setup/fog/BG data is in place
+// before the first level reads it. This stripped-down hook carries none of the
+// upstream keyboard/mouse machinery (this fork has no mouse-look feature).
+// ===========================================================================
+void ge_apply_ce_data_patches(uint8_t* base);  // ge_ce_patches.cpp
+
+void ge_ce_bootstrap() {
+  static bool ce_patched = false;
+  if (ce_patched) return;
+  ce_patched = true;
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  ge_apply_ce_data_patches(base);
+  REXKRNL_INFO("GECE community data bug-fixes applied");
+}
+
+// ===========================================================================
+// BeanTools Community Edition CODE fixes (instruction patches replicated as
+// midasm hooks; the recomp runs generated C++ so the xex bytes can't be patched
+// directly). Addresses/values 1:1 with finalizer.c. Data-only CE fixes live in
+// ge_ce_patches.cpp.
+// ===========================================================================
+
+// fix_door_volume_clamp @0x820DD814: `li r3,0` -> `li r3,1` (min volume for
+// distant doors; 0 overflows). After-hook forces r3 = 1.
+void ge_ce_door_vol(PPCRegister& r3) { r3.u32 = 1; }
+
+// remove_beta_string_at_logo @0x820ED678: `ori r3,r3,0x9D97` -> `...0x9CE3`
+// (point the GoldenEye-logo string id at the empty string). Replace low half.
+void ge_ce_beta_str(PPCRegister& r3) {
+  r3.u32 = (r3.u32 & 0xFFFF0000u) | 0x9CE3u;
+}
+
+// extend_audio_distance, store site 0x8214438C: original `stfs f0,0x5C(r31)`
+// stored a small default scaler; CE makes X3DEmitter->CurveDistanceScaler =
+// 6500.0f. Re-store 6500.0f (0x45CB2000) to r31+0x5C after the original store.
+void ge_ce_audio_dist(PPCRegister& r31) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  ST32(base, r31.u32 + 0x5Cu, 0x45CB2000u);  // 6500.0f
+}
+
+// hardcode_near_clip_to_2, per-fog store site 0x82117B44: original
+// `stfs f0,0x14(r11)` writes the fog entry's near-clip into the global. CE NOOPs
+// it and pins the global to 2.0f. Can't NOOP a store in the recomp, so re-write
+// the just-stored slot (r11+0x14 == the near-clip global) back to 2.0f each load.
+void ge_ce_near_clip(PPCRegister& r11) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  ST32(base, r11.u32 + 0x14u, 0x40000000u);  // 2.0f
+}
+
+// remove_original_graphics_mode_blur @0x82188E70: CE NOOPs `bne cr6,+0x19C` so
+// the blur path is never taken. Branch-replace -> always fall through.
+//   jump_on_true  = 0x8218900C (original target, never taken)
+//   jump_on_false = 0x82188E74 (fall through)
+bool ge_ce_blur(PPCRegister& /*r3*/) { return false; }
+
+// remove_original_graphics_mode_from_intro @0x8209972C: CE turns
+// `bne cr6,0x82099750` into an unconditional `b 0x82099750` so the intro reads
+// the current graphics-mode flag. Branch-replace -> always take.
+//   jump_on_true  = 0x82099750 (always)
+//   jump_on_false = 0x82099730 (unused)
+bool ge_ce_intro_gfx(PPCRegister& /*r3*/) { return true; }
+
+// ===========================================================================
+// BeanTools Community Edition MP / network hack-functions, re-implemented as
+// midasm hooks (the recomp can't add the new 0x830E guest code, so each hack's
+// logic is replicated in C++ -- the same pattern as ge_hook_830E0xxx). Game
+// functions are called directly via their generated sub_ symbols. 1:1 with
+// finalizer.c.
+// ===========================================================================
+namespace { constexpr uint32_t GE_NET_FLAG = 0x830CAEA0u; }  // byte: !=0 = network MP session
+
+// disable_doors_autoclosing_on_mp @0x820E4F1C (after `lwz r11,0xE8(r30)` loads
+// the door open-tick): in a network session, force it to 0 so doors never
+// auto-close. Outside a session, keep the loaded value.
+void ge_ce_mp_door(PPCRegister& r11) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  if (base[GE_NET_FLAG] != 0) r11.u32 = 0;
+}
+
+// disable_player_collisions_for_network_mp @0x820CDFA4 (replaces `bl sub_820B3E90`,
+// the player-collision-radius calc): run it normally outside a network session;
+// in one, skip it so players pass through each other. The CE hack tail-returns
+// from the enclosing function in both cases, so return=true.
+void ge_ce_mp_collision() {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
+  if (base[GE_NET_FLAG] == 0) sub_820B3E90(*ctx, base);
+}
+
+// fix_golden_gun_respawn_visiblity_flag @0x820CF940 (replaces cmpwi/bne): keep
+// the respawning weapon's invisible flag only for the golden gun in the MWTGG
+// scenario (so it stays hidden until grabbed); otherwise clear it so weapons
+// reappear. MP scenario id @0x82F61084; weapon id in r11 (golden gun = 0x13).
+//   jump_on_true  = 0x820CF948 (keep invisible: GG path)
+//   jump_on_false = 0x820CF94C (clear flag: normal path)
+bool ge_ce_golden_gun(PPCRegister& r11) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  return LD32(base, 0x82F61084u) == 3u && r11.u32 == 0x13u;
+}
+
+// make_mp_always_use_p2_fog @0x82117CB0 (after `cmpwi cr6,r3,1` @0x82117CAC; r3 =
+// active player count): with 2+ players, force the fog index to 2 (P2 fog) for a
+// consistent look; 1 player keeps the original path.
+//   jump_on_true  = 0x82117CB8 (2+ players: continue with r3=2)
+//   jump_on_false = 0x82117CB4 (1 player: original `li r3,0`)
+bool ge_ce_p2_fog(PPCRegister& r3) {
+  if (r3.s32 != 1) { r3.u32 = 2; return true; }
+  return false;
+}
+
+// fix_network_armor_bug @0x8216BC1C (after `stw r12,0x64(r30)`): re-implements
+// the CE `cal_dam` armor hack (the patch ships its C source). When an armor prop
+// is processed, award it to the NEAREST player within 10m -- fixes armor not
+// being granted to remote players in network MP. r30 = armor prop pointer.
+// Offsets from armor_fix_code.h: prop.type@+3, prop.pos@+0x58, prop.armorval@+0x84;
+// player coords ptr@+0x1AC, coord.pos@+0xC, player.armor@+0x1E8. Float consts:
+// 50.0@0x82000B90, 1000.0@0x8200371C (=10m), 1e6@0x82003F0C.
+void ge_ce_armor_fix(PPCRegister& r30) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  const uint32_t prop = r30.u32;
+  if (base[prop + 3] != 0x15) return;  // not an armor prop
+  const float f50 = LDF32(base, 0x82000B90u);
+  const float f1000 = LDF32(base, 0x8200371Cu);
+  float nearest = LDF32(base, 0x82003F0Cu);  // 1,000,000
+  const float px = LDF32(base, prop + 0x58u);
+  const float py = LDF32(base, prop + 0x5Cu);
+  const float pz = LDF32(base, prop + 0x60u);
+  int pick = -1;
+  for (int i = 0; i < 4; ++i) {
+    const uint32_t pl = LD32(base, 0x82F1FA98u + i * 4u);
+    if (!pl) continue;
+    const uint32_t coords = LD32(base, pl + 0x1ACu);
+    const float dx = LDF32(base, coords + 0x0Cu) - px;
+    const float dy = (LDF32(base, coords + 0x10u) - f50) - py;
+    const float dz = LDF32(base, coords + 0x14u) - pz;
+    const float test = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (test < nearest) { nearest = test; pick = i; }
+  }
+  if (pick < 0 || nearest > f1000) return;  // nearest player >10m away (or none)
+  const uint32_t winner = LD32(base, 0x82F1FA98u + pick * 4u);
+  STF32(base, winner + 0x1E8u, LDF32(base, prop + 0x84u));  // grant armorval
+}
+
+// increase_mp_characters: bump the unlocked MP character count from 0x21 to 0x32
+// (`li r11,0x21` -> `li r11,0x32`) at the two unlock sites (0x820EF350 SP-clear,
+// 0x82106C54 system-link). The new character struct data is written in
+// ge_ce_patches.cpp (mpchars_altsandbonus -> 0x8272BA80).
+void ge_ce_mp_charcount(PPCRegister& r11) { r11.u32 = 0x32u; }
+
+// add_sfx_to_remote_player_weapons @0x8216E25C (runs BEFORE the original
+// `add r11,r10,r11`): play the firing SFX for a REMOTE player's weapon so you
+// hear other players shoot online. The CE hack saved/restored every register
+// around the SFX calls; we snapshot/restore the whole PPC context so the
+// remote-fire (tracer-spawn) function continues undisturbed -- the SFX is a pure
+// side effect. r11 = remote player struct pointer.
+//   paused flag @0x830633EC; remote-fire gate player+0x2044; old sound-buffer
+//   slots player+0xAFC / +0xB00; current weapon player+0x928; weapon-stats array
+//   @0x82421968 stride 0x38 (model flag +0x08, stats ptr +0x0C, sound id +0x26);
+//   play=sub_82144920, free=sub_82144970/sub_82144A08, set-loc=sub_821448F8;
+//   solo-fullscreen screen flag @0x8272B424; player coords player+0x1AC (+0xC).
+void ge_ce_remote_weapon_sfx(PPCRegister& r11) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
+  const uint32_t player = r11.u32;
+  if (!player) return;
+  if (LD32(base, 0x830633ECu) != 0) return;        // game paused
+  if (LD32(base, player + 0x2044u) != 0) return;   // remote-fire gate
+
+  PPCContext saved = *ctx;  // the SFX calls clobber volatile regs; restore after
+
+  auto deactivate = [&](uint32_t slot) {
+    uint32_t buf = LD32(base, slot);
+    if (!buf) return;
+    ctx->r3.u32 = buf; sub_82144970(*ctx, base);
+    if (ctx->r3.u32 == 0) return;
+    ctx->r3.u32 = LD32(base, slot); sub_82144A08(*ctx, base);
+  };
+  deactivate(player + 0x0AFCu);   // free old sound buffer 1
+  deactivate(player + 0x0B00u);   // free old sound buffer 2
+
+  const uint32_t snd_slot = player + 0x0B00u;  // play into buffer-2 slot
+  const uint32_t channel  = 0x1461u;
+
+  const uint32_t weapon = LD32(base, player + 0x928u);
+  const uint32_t entry  = 0x82421968u + weapon * 0x38u;  // weapon stats entry
+  if (LD32(base, entry + 0x08u) != 0) { *ctx = saved; return; }  // no model -> no sfx
+  const uint32_t stats = LD32(base, entry + 0x0Cu);
+  if (stats == 0) { *ctx = saved; return; }                     // null stats
+  const uint32_t sound_id = LD16(base, stats + 0x26u);          // weapon sound id
+  if ((int32_t)sound_id > 0x105) { *ctx = saved; return; }      // illegal range
+
+  ctx->r3.u32 = LD32(base, 0x83064DE0u);
+  ctx->r4.u32 = sound_id;
+  ctx->r5.u32 = snd_slot;
+  ctx->r6.u32 = LD32(base, 0x83064DE8u);
+  ctx->r7.u32 = 0x820036A8u;
+  ctx->r8.u32 = channel;
+  sub_82144920(*ctx, base);          // play sfx -> r3 = sound buffer
+  const uint32_t buf = ctx->r3.u32;
+  if (buf != 0 && LD32(base, 0x8272B424u) == 3u) {  // solo full-screen -> 3D pos
+    const uint32_t coord = LD32(base, player + 0x01ACu);
+    ctx->r3.u32 = buf;
+    ctx->r4.u32 = coord + 0x0Cu;
+    sub_821448F8(*ctx, base);        // set 3D location
+  }
+
+  *ctx = saved;  // restore -> remote-fire function continues unaffected
+}
+
+// set_mp_sfx_to_use_player_location: the 4 SFX call sites (gasp 0x820BF264,
+// slapper 0x820CDC5C, knife 0x820ACF54, item-equip 0x820AC4D0) all originally
+// `bl sub_82144920` (play sfx). CE redirects each through a helper that plays the
+// sound AND positions it at the emitting player's 3D location, so in
+// split-screen-solo/online you hear other players' actions directionally. This
+// hook IS that helper: it plays the sfx (args already in ctx from the caller),
+// then sets the 3D location -- but only when another player is the source (not
+// the local/active-viewport player, whose own sounds stay centered). Registered
+// at all 4 sites with jump_address = site+4 to replace the original bl. No reg
+// save needed: the original was itself a bl, so volatiles are already clobbered.
+// Shared helper: play the sfx (args already in ctx) and 3D-position it at the
+// emitting player -- but only when the source is a NON-local player (the local/
+// active-viewport player's own sounds stay centered).
+static void ge_ce_play_at_location(PPCContext* ctx, uint8_t* base) {
+  sub_82144920(*ctx, base);                    // play sfx (caller's args in ctx)
+  const uint32_t buf = ctx->r3.u32;            // sound buffer handle
+  if (buf == 0) return;                        // null buffer -> done
+  if (LD32(base, 0x8272B424u) != 3u) return;   // not solo full-screen view
+  if (LD32(base, 0x82F1FA9Cu) == 0 && LD64(base, 0x82F1FAA0u) == 0)
+    return;                                    // single-player -> no positioning
+  const uint32_t cur = LD32(base, 0x82F1FAACu);  // current player
+  if (LD32(base, cur + 0x904u) == 0) return;   // local active viewport -> centered
+  const uint32_t coord = LD32(base, cur + 0x1ACu);
+  ctx->r3.u32 = buf;
+  ctx->r4.u32 = coord + 0x0Cu;                 // -> player world location
+  sub_821448F8(*ctx, base);                    // set 3D location
+  ctx->r3.u32 = buf;                           // leave buffer in r3 for downstream
+}
+
+void ge_ce_sfx_3d() {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
+  ST32(base, 0x824203ACu, 0);  // your own sound -> your death -> death tune plays
+  ge_ce_play_at_location(ctx, base);
+}
+
+// Trigger Gasps If Local Player Damaged, Else Argh (set_mp_sfx, gasp half) @
+// 0x820BF408 (replaces `bl sub_82144920`). When the damaged player is a REMOTE
+// player (solo-fullscreen + MP + not the local viewport + has a model), play a
+// gender-appropriate "argh" at their 3D location and flag this death as NOT
+// yours (0x824203AC=1) so the death tune is suppressed for it; otherwise it's
+// your own gasp (flag=0 -> death tune plays). jump_address skips the original bl.
+//   chr = player+0x1AC, model = chr+0x08, bodynum = model+0x0F; body-info array
+//   0x82729020 stride 0x24, gender +0x18; argh index female 0x83062BF4 (0..2,
+//   +0x0D) / male 0x83062BF8 (0..0x18, +0x86).
+void ge_ce_gasp() {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
+  uint32_t model = 0;
+  if (LD32(base, 0x8272B424u) == 3u) {                       // solo full-screen
+    const bool mp = (LD32(base, 0x82F1FA9Cu) != 0) || (LD64(base, 0x82F1FAA0u) != 0);
+    if (mp) {
+      const uint32_t cur = LD32(base, 0x82F1FAACu);
+      if (LD32(base, cur + 0x904u) != 0) {                   // not the local viewport
+        const uint32_t chr = LD32(base, cur + 0x1ACu);
+        if (chr) model = LD32(base, chr + 0x08u);
+      }
+    }
+  }
+  if (model != 0) {                                          // remote player damaged
+    ST32(base, 0x824203ACu, 1u);                             // not your death
+    const uint32_t bodynum = base[model + 0x0Fu];
+    const uint32_t gender = base[0x82729020u + bodynum * 0x24u + 0x18u];
+    ctx->r5.u32 = 0;
+    uint32_t arghid;
+    if (gender == 0u) {                                      // female
+      int32_t i = (int32_t)LD32(base, 0x83062BF4u) + 1;
+      if (i > 2) i = 0;
+      ST32(base, 0x83062BF4u, (uint32_t)i);
+      arghid = (uint32_t)i + 0x0Du;
+    } else {                                                 // male
+      int32_t i = (int32_t)LD32(base, 0x83062BF8u) + 1;
+      if (i > 0x18) i = 0;
+      ST32(base, 0x83062BF8u, (uint32_t)i);
+      arghid = (uint32_t)i + 0x86u;
+    }
+    ctx->r4.u32 = arghid;
+    ge_ce_play_at_location(ctx, base);                       // argh at their location
+  } else {                                                   // your own gasp
+    ST32(base, 0x824203ACu, 0u);                             // your death -> death tune plays
+    sub_82144920(*ctx, base);                                // play gasp (caller's args)
+  }
+}
+
+// only_trigger_mp_death_tune_for_your_kills_and_yourself @0x820BFB04 (the
+// `bl <play death tune>`; r3 already = 6 from the vanilla `li r3,6` at 0x820BFB00).
+// Skip the death tune when 0x824203AC is set (the gasp hook flagged this death as
+// another player's). jump_on_true skips the bl; no jump_on_false -> falls through
+// and plays it for your own deaths.
+bool ge_ce_death_tune() {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  return LD32(base, 0x824203ACu) != 0u;
+}
+
+// reset_internal_cheat_state float relocation @0x8209D88C: the death-tune logic
+// reads a 5.0f that originally lived at the address CE now repurposes as the
+// bypass flag (0x824203AC). After the original `lfs f1,0x3AC(r11)`, reload f1
+// from +0x3A8 instead (where ge_ce_patches stashes the 5.0f). r11 = 0x82420000.
+void ge_ce_killtune_float(PPCRegister& r11, PPCRegister& f1) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  f1.f64 = (double)LDF32(base, r11.u32 + 0x3A8u);
+}
+
+// fix_watch_volume_sliders_range: the watch volume sliders only spanned half the
+// real 0-100 range. CE reads the stored byte and halves it for display, and
+// doubles the slider value before storing (entering the save routine past its
+// clamp). READ hooks replace `bl <vol read>` (r3 = settings ptr -> vol byte >> 1);
+// SAVE hooks replace `bl <vol save>` (double r4, then run the save routine from
+// its mid-point continuation so the doubled value isn't clamped back). Music vol
+// byte = settings+0x295, fx vol = settings+0x294. All use jump_address = site+4.
+void ge_ce_watch_music_read(PPCRegister& r3) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  r3.u32 = (uint32_t)(base[r3.u32 + 0x295u] >> 1);
+}
+void ge_ce_watch_sfx_read(PPCRegister& r3) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  r3.u32 = (uint32_t)(base[r3.u32 + 0x294u] >> 1);
+}
+void ge_ce_watch_music_save() {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
+  ctx->r4.u32 = ctx->r4.u32 + ctx->r4.u32;   // double the slider value
+  ge_cont_82184E18(*ctx, base);              // save routine past its clamp
+}
+void ge_ce_watch_sfx_save() {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
+  ctx->r4.u32 = ctx->r4.u32 + ctx->r4.u32;
+  ge_cont_82184E48(*ctx, base);
 }
